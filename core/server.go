@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/patrickmn/go-cache"
+	"github.com/rs/zerolog/log"
 )
 
 type Server struct {
@@ -38,23 +38,55 @@ func NewPeer(virtualIP net.IP, addr *net.UDPAddr, handshaked bool) *Peer {
 	}
 }
 
-func (server *Server) Start() error {
+func (server *Server) Start() {
+	log.Info().
+		Str("state", "starting").
+		Str("serverAddr", server.FullAddr).
+		Msg("Starting server")
+
+	interfaceIP, _, err := net.ParseCIDR(server.CIDR)
+	if err != nil {
+		log.Fatal().
+			Err(err).
+			Str("state", "configTunnel").
+			Str("CIDR", server.CIDR).
+			Msg("Failed to parse CIDR")
+	}
+
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {
-		return err
+		log.Fatal().
+			Err(err).
+			Str("state", "starting").
+			Str("serverAddr", server.FullAddr).
+			Msg("Failed to resolve server address")
 	}
 
 	server.Conn, err = net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return err
+		log.Fatal().
+			Err(err).
+			Str("state", "starting").
+			Str("addr", server.FullAddr).
+			Msg("Failed to start server")
 	}
-	log.Printf("VPN server listening on %s", server.FullAddr)
 
-	ConfigTunnel("", server.CIDR, "10.0.0.1", "gotun0")
+	log.Info().
+		Err(err).
+		Str("state", "starting").
+		Str("addr", server.FullAddr).
+		Msg("VPN server listening")
 
-	// interface => udp
-	go func() {
+	ConfigTunnel("", server.CIDR, interfaceIP.String(), "gotun0", []string{})
+
+	log.Info().
+		Str("state", "starting").
+		Str("serverAddr", server.FullAddr).
+		Msg("Tunnel started")
+
+	go func() { // udp <= interface
 		buffer := make([]byte, 1500)
+		var key string
 		for {
 			n, err := server.Interface.Read(buffer)
 			if err != nil || n == 0 {
@@ -62,7 +94,6 @@ func (server *Server) Start() error {
 			}
 
 			version := buffer[0] >> 4
-			fmt.Printf("IPv%d", version)
 			switch version {
 			case 4:
 				gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
@@ -77,25 +108,57 @@ func (server *Server) Start() error {
 					Length:   uint16(n),
 					Data:     buffer[:n],
 				}
-				fmt.Println("received packet from", packet.SrcIP, "to", packet.DstIP)
-				key := fmt.Sprintf("%v=>%v", packet.DstIP, packet.SrcIP)
+				key = fmt.Sprintf("%v=>%v", packet.DstIP, packet.SrcIP)
 				v, ok := server.Cache.Get(key)
 				if ok {
 					bytes, err := MarshalPacket(&packet)
 					if err != nil {
-						log.Println("error marshalling packet", err)
+						log.Debug().
+							Str("state", "I2U").
+							Int("len", n).
+							Int("addrType", int(packet.AddrType)).
+							Str("srcIP", ip4.SrcIP.String()).
+							Str("dstIP", ip4.DstIP.String()).
+							Msg("(UDP<=Interface) Failed to marshal packet")
+						continue
 					}
 					_, err = server.Conn.WriteToUDP(bytes, v.(*net.UDPAddr))
 					if err != nil {
-						log.Printf("WriteToUDP failed: %v", err)
+						log.Debug().
+							Str("state", "I2U").
+							Int("len", n).
+							Int("addrType", int(packet.AddrType)).
+							Str("srcIP", ip4.SrcIP.String()).
+							Str("dstIP", ip4.DstIP.String()).
+							Msg("(UDP<=Interface) Failed to send packet")
+					} else {
+						log.Debug().
+							Str("state", "I2U").
+							Int("len", n).
+							Int("addrType", int(packet.AddrType)).
+							Str("srcIP", ip4.SrcIP.String()).
+							Str("dstIP", ip4.DstIP.String()).
+							Msg("(UDP<=Interface) Sent a packet")
 					}
 				} else {
-					fmt.Println("KEY ERROR", key, server.Cache)
+					log.Debug().
+						Str("state", "I2U").
+						Int("len", n).
+						Int("addrType", int(packet.AddrType)).
+						Str("srcIP", ip4.SrcIP.String()).
+						Str("dstIP", ip4.DstIP.String()).
+						Msg("(UDP<=Interface) Can not find peer receiver")
 				}
 
 			case 6:
 				//gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv6, gopacket.NoCopy)
 				//ip6 := gop.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+				//log.Warn().
+				//	Int("len", n).
+				//	Str("state", "I2U").
+				//	Int("addrType", int(version)).
+				//	Str("key", key).
+				//	Msg("(UDP<=Interface) IPv6 not supported")
 				continue
 
 			default:
@@ -112,12 +175,24 @@ func (server *Server) Start() error {
 			log.Printf("udp read error: %v", err)
 			continue
 		}
+		var version int
+		if clientAddr.IP.To4() != nil {
+			version = 4
+		} else {
+			version = 6
+		}
 
 		if _, found := server.Cache.Get(clientAddr.String()); !found {
 
 			peer, err := server.Handshake(n, buf, clientAddr)
 			if err != nil || !peer.Handshaked {
-				log.Printf("handshake failed from %v: %v", clientAddr, err)
+				log.Debug().
+					Err(err).
+					Int("len", n).
+					Str("state", "U2I").
+					Int("addrType", version).
+					Str("peerIP", clientAddr.String()).
+					Msg("(UDP=>Interface) Handshake failed")
 				continue
 			}
 
@@ -127,23 +202,45 @@ func (server *Server) Start() error {
 				cache.DefaultExpiration,
 			)
 
-			log.Printf("new client handshaked: %v", clientAddr)
+			log.Info().
+				Int("len", n).
+				Str("state", "U2I").
+				Int("addrType", version).
+				Str("peerIP", clientAddr.String()).
+				Msg("(UDP=>Interface) Handshake success")
 			continue
 		}
 
 		packet, err := UnmarshalPacket(buf[:n])
 		if err != nil || packet.AddrType != 4 {
-			log.Printf("UnmarshalPacket IPv%d failed: %v", packet.AddrType, err)
+			log.Debug().
+				Err(err).
+				Int("len", n).
+				Str("state", "U2I").
+				Int("addrType", version).
+				Msg("(UDP=>Interface) Failed to marshal packet")
 			continue
 		}
-		//DumpHex(buf[:n], len(buf[:n]))
 
 		if _, err := server.Interface.Write(packet.Data); err != nil {
-			continue
+			log.Debug().
+				Err(err).
+				Int("len", n).
+				Str("state", "U2I").
+				Int("addrType", version).
+				Str("srcIP", packet.SrcIP.String()).
+				Str("dstIP", packet.DstIP.String()).
+				Msg("(UDP=>Interface) Sent a packet")
+		} else {
+			log.Debug().
+				Err(err).
+				Int("len", n).
+				Str("state", "U2I").
+				Int("addrType", version).
+				Str("srcIP", packet.SrcIP.String()).
+				Str("dstIP", packet.DstIP.String()).
+				Msg("(UDP=>Interface) Failed to send packet")
 		}
-		//DumpHex(packet.Data, len(packet.Data))
-
-		fmt.Println("sent packet to", packet.DstIP, "from", packet.SrcIP)
 
 		key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
 		server.Cache.Set(key, clientAddr, cache.DefaultExpiration)
@@ -199,6 +296,6 @@ func (network *Network) increment() {
 	}
 }
 
-// фрагментация UDP; шифрование; таймауты; старых peer надо чистить по lastseen; белые и черные списки; нормальный лог;
+// фрагментация UDP; шифрование; таймауты; старых peer надо чистить по lastseen; черные списки;
 // аргументация в клиенте; сделать интерфейс врапперов; сделать базовый httpws враппер; присобачить нжинкс
 // приделать базу данных; сделать из впна микросервис докер; присобачить бота; дописать страничку;

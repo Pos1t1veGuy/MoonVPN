@@ -4,18 +4,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"net"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 )
 
 func (client *Client) Handshake() (net.IP, error) {
 	_, err := client.serverConn.Write([]byte{0x01, 0x01})
 
 	if err != nil {
-		log.Printf("udp send error: %v", err)
+		return nil, fmt.Errorf("udp send error: %v", err)
 	}
 
 	buf := make([]byte, 1024)
@@ -47,25 +43,22 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, er
 	if n >= 2 && buf[0] == 0x01 && buf[1] == 0x01 {
 		virtualIP, err := server.Network.Next()
 		if err != nil {
-			fmt.Printf("get next virtual ip failed: %v", err)
-			return server.AnonymousPeer, nil
+			return server.AnonymousPeer, fmt.Errorf("get next virtual ip failed: %v", err)
 		}
 
 		resp := append([]byte{0x02, 0x00}, virtualIP.To4()...)
 		_, err = server.Conn.WriteToUDP(resp, addr)
 		if err != nil {
-			log.Printf("handshake response error: %v", err)
-		} else {
-			log.Printf("handshake success: %s -> %s", addr.String(), virtualIP.String())
-
-			server.mu.Lock()
-			server.Peers[addr.String()] = NewPeer(virtualIP, addr, true)
-			server.mu.Unlock()
-
-			return server.Peers[addr.String()], nil
+			return server.AnonymousPeer, fmt.Errorf("handshake response error: %v", err)
 		}
+
+		server.mu.Lock()
+		server.Peers[addr.String()] = NewPeer(virtualIP, addr, true)
+		server.mu.Unlock()
+
+		return server.Peers[addr.String()], nil
 	}
-	return server.AnonymousPeer, nil
+	return server.AnonymousPeer, errors.New("not a handshake")
 }
 
 // [PacketType:1][AddrType:1][SrcIP:4/16][DstIP:4/16][Rst:4][Length:2][Data:N]
@@ -99,7 +92,6 @@ func MarshalPacket(p *Packet) ([]byte, error) {
 
 	buf = append(buf, p.Data...)
 
-	fmt.Println("!!!", buf)
 	return buf, nil
 }
 func UnmarshalPacket(data []byte) (*Packet, error) {
@@ -132,31 +124,4 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 	p.Data = data[offset:]
 
 	return p, nil
-}
-
-func ParseUDP(buffer []byte) (string, string, error) {
-	var ip *layers.IPv4
-	var gop gopacket.Packet
-
-	version := buffer[0] >> 4
-	switch version {
-	case 4:
-		gop = gopacket.NewPacket(buffer, layers.LayerTypeIPv4, gopacket.NoCopy)
-		ip = gop.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	case 6:
-		//gop = gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv6, gopacket.NoCopy)
-		//ip = gop.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-		return "", "", fmt.Errorf("IPv6 not supported")
-	}
-
-	udpLayer := gop.Layer(layers.LayerTypeUDP)
-	if udpLayer == nil {
-		return "", "", fmt.Errorf("not a UDP packet")
-	}
-	udp, _ := udpLayer.(*layers.UDP)
-
-	src := fmt.Sprintf("%s:%d", ip.SrcIP.String(), udp.SrcPort)
-	dst := fmt.Sprintf("%s:%d", ip.DstIP.String(), udp.DstPort)
-
-	return src, dst, nil
 }

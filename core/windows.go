@@ -1,18 +1,17 @@
 //go:build windows
 
-package windows
+package core
 
 import (
-	"log"
 	"net"
 	"time"
 
-	"github.com/Pos1t1veGuy/MoonVPN/core"
+	"github.com/rs/zerolog/log"
 	"golang.zx2c4.com/wintun"
 )
 
 type WintunAdapter struct {
-	core.DefaultAdapter
+	DefaultAdapter
 
 	Session wintun.Session
 	Adapter *wintun.Adapter
@@ -34,10 +33,10 @@ func NewWintunAdapter(name string, sessionBufSize uint32) (*WintunAdapter, error
 	time.Sleep(300 * time.Millisecond)
 	Interface, err := net.InterfaceByName(name)
 	if err != nil {
-		log.Panicf("error get interface index: %v", err)
+		return nil, err
 	}
 	return &WintunAdapter{
-		DefaultAdapter: core.DefaultAdapter{
+		DefaultAdapter: DefaultAdapter{
 			IfaceName:  name,
 			IfaceIndex: Interface.Index,
 		},
@@ -73,14 +72,17 @@ func (adapter *WintunAdapter) Close() {
 	adapter.Close()
 }
 
-func NewClient(addr string, port int, whiteList []string, CIDR string) *core.Client {
+func NewWindowsClient(addr string, port int, whiteList []string, CIDR string) *Client {
 	adapter, err := NewWintunAdapter("gotun0", 8*1024*1024)
 	if err != nil {
-		panic(err)
+		log.Fatal().
+			Err(err).
+			Str("state", "starting").
+			Msg("Failed to create adapter")
 	}
-	return &core.Client{
+	return &Client{
 		WhiteList: whiteList,
 		Interface: adapter,
-		Endpoint:  *core.NewEndpoint(addr, port, CIDR),
+		Endpoint:  *NewEndpoint(addr, port, CIDR),
 	}
 }

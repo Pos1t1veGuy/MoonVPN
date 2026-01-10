@@ -4,19 +4,32 @@ package main
 
 import (
 	"flag"
-	"log"
+	"fmt"
+	"os"
 
-	"github.com/Pos1t1veGuy/MoonVPN/core/linux"
+	"github.com/Pos1t1veGuy/MoonVPN/core"
 )
 
 func main() {
-	host := flag.String("host", "127.0.0.1", "application host")
-	port := flag.Int("port", 8080, "application port")
+	validLogLevels := map[string]struct{}{
+		"debug": {},
+		"info":  {},
+		"warn":  {},
+		"error": {},
+	}
+
+	cidr := flag.String("cidr", "10.0.0.1/24", "application net interface CIDR")
+	host := flag.String("host", "0.0.0.0", "application host")
+	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
+	port := flag.Int("port", 5555, "application port")
 	flag.Parse()
 
-	srv := linux.NewLinuxServer(*host, *port, "10.0.0.1/24")
-	log.Printf("Starting server on %s:%d", *host, *port)
-	if err := srv.Start(); err != nil {
-		log.Fatalf("Server error: %v", err)
+	if _, ok := validLogLevels[*logLevel]; !ok {
+		fmt.Fprintf(os.Stderr, "invalid logLevel: %q\n", *logLevel)
+		os.Exit(1)
 	}
+
+	core.InitLogger(*logLevel)
+	srv := core.NewLinuxServer(*host, *port, *cidr)
+	srv.Start()
 }

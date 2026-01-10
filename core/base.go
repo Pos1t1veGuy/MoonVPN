@@ -3,13 +3,18 @@ package core
 import (
 	"bytes"
 	"fmt"
-	"log"
+	"io"
+	stdlog "log"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 type Endpoint struct {
@@ -26,7 +31,11 @@ type Endpoint struct {
 func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 	_, ipNet, err := net.ParseCIDR(CIDR)
 	if err != nil {
-		log.Panicf("error cidr %v", CIDR)
+		log.Fatal().
+			Err(err).
+			Str("state", "factory").
+			Str("CIDR", CIDR).
+			Msg("Failed to parse CIDR")
 	}
 
 	return &Endpoint{
@@ -39,67 +48,111 @@ func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 	}
 }
 
-func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, IfaceName string) {
+func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, IfaceName string, whitelist []string) {
 	ip, ipNet, err := net.ParseCIDR(netCidr)
 	if err != nil {
-		log.Panicf("error cidr %v", netCidr)
+		log.Fatal().
+			Err(err).
+			Str("state", "configTunnel").
+			Str("CIDR", netCidr).
+			Msg("Failed to parse CIDR")
 	}
+
+	// getting interfaces info
+	defIfaceName, defIfaceIP, defIfaceIndex, err := getDefaultInterface()
+	if err != nil {
+		log.Fatal().
+			Err(err).
+			Str("state", "configTunnel").
+			Msg("Failed to get default interface")
+	}
+	log.Debug().
+		Str("state", "configTunnel").
+		Int("index", defIfaceIndex).
+		Str("name", defIfaceName).
+		Str("ip", defIfaceIP.String()).
+		Msg("Default adapter info")
+	curIface, err := net.InterfaceByName(IfaceName)
+	if err != nil {
+		log.Fatal().
+			Err(err).
+			Str("state", "configTunnel").
+			Str("ifaceName", IfaceName).
+			Msg("Failed to get VPN interface")
+	}
+	log.Debug().
+		Str("state", "configTunnel").
+		Int("index", curIface.Index).
+		Str("name", IfaceName).
+		Msg("VPN adapter info")
 
 	// destinationIP only for client to exclude server IP in routes
 	switch runtime.GOOS {
 	case "linux":
 		if destinationIP != "" { // client
+			// excluding route to remove connection loop
 			ExecCmd("ip", "route", "add", destinationIP, "dev", "eth0")
 		} else { // server
+			// enable NAT
 			ExecCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
 			ExecCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", netCidr, "-o", "eth0", "-j", "MASQUERADE")
 		}
 
 		ifaceMaskOnes, _ := ipNet.Mask.Size()
+		// tun interface off
 		ExecCmd("ip", "link", "set", "dev", IfaceName, "down")
+		// clear old IPs
 		ExecCmd("ip", "addr", "flush", "dev", IfaceName)
+		// make interface net
 		ExecCmd("ip", "addr", "add", fmt.Sprintf("%s/%d", interfaceIP, ifaceMaskOnes), "dev", IfaceName)
-
+		// set mtu
 		ExecCmd("ip", "link", "set", "dev", IfaceName, "mtu", "1500")
+		// turn interface on
 		ExecCmd("ip", "link", "set", "dev", IfaceName, "up")
+
 		//ExecCmd("ip", "route", "add", "1.1.1.1", "dev", IfaceName) // dns
 	case "darwin":
-		panic("конфигурация туннеля на дарвине не доделана =(")
+		log.Fatal().
+			Err(err).
+			Str("state", "configTunnel").
+			Str("CIDR", netCidr).
+			Msg("Failed to parse CIDR")
 	case "windows":
 		ifaceMask := net.IP(ipNet.Mask).String()
 		gatewayIP := ip.String()
 
-		// getting interfaces info
-		_, defIfaceIP, defIfaceIndex, err := getDefaultInterface()
-		fmt.Println("default interface: Беспроводная сеть", defIfaceIP, defIfaceIndex)
-		if err != nil {
-			log.Panicf("error get default interface: %v", err)
-		}
-		curIface, err := net.InterfaceByName(IfaceName)
-		if err != nil {
-			log.Panicf("error get current interface index: %v", err)
-		}
-		fmt.Println("current interface:", IfaceName, interfaceIP, curIface.Index)
-
-		// excluding route to remove connection loop
-		if destinationIP != "" {
-			ExecCmd("route", "add", destinationIP, "mask", "255.255.255.255", defIfaceIP.String(),
-				"metric", "1", "if", strconv.Itoa(defIfaceIndex))
-		}
-
-		// add IP to interface
-		ExecCmd("cmd", "/C",
-			fmt.Sprintf(`netsh interface ipv4 set address name="%s" static %s mask=%s`, IfaceName, interfaceIP, ifaceMask))
-
+		// set interface IP
+		ExecCmd("cmd", "/C", fmt.Sprintf(`netsh interface ipv4 set address name="%s" static %s mask=%s`,
+			IfaceName, interfaceIP, ifaceMask))
 		// set metric to interface
 		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
+
+		if destinationIP != "" { // client
+			if len(whitelist) == 0 {
+				// excluding route to remove connection loop
+				ExecCmd("route", "add", destinationIP, "mask", "255.255.255.255", defIfaceIP.String(),
+					"metric", "1", "if", strconv.Itoa(defIfaceIndex))
+				// add absolute route to interface
+				ExecCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", "0.0.0.0", "metric", "1",
+					"if", strconv.Itoa(curIface.Index))
+			} else {
+				for _, addr := range whitelist { // TODO: make DNS resolver
+					ip := net.ParseIP(addr)
+					if ip != nil && ip.IsGlobalUnicast() {
+						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
+							"if", strconv.Itoa(curIface.Index))
+					} else {
+						log.Error().
+							Str("addr", addr).
+							Msg("Failed to parse IP address")
+					}
+				}
+			}
+		}
 
 		//// add dns route
 		//ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf("name=%d", IfaceName),
 		//	fmt.Sprintf("static=%d", ip.String()))
-
-		// add absolute route to interface (возможно стоит заменить gatewayIP на 0.0.0.0)
-		ExecCmd("route", "add", "188.40.167.82", "mask", "255.255.255.255", gatewayIP, "metric", "1", "if", strconv.Itoa(curIface.Index))
 
 	default:
 		log.Printf("not support os:%v", runtime.GOOS)
@@ -109,46 +162,54 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 func ExecCmd(c string, args ...string) string {
 	cmd := exec.Command(c, args...)
 	var out bytes.Buffer
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = &out
-	cmd.Stdin = os.Stdin
 	err := cmd.Run()
 	if err != nil {
-		log.Fatalln("failed to exec", cmd, "=>", err)
+		log.Error().
+			Err(err).
+			Str("state", "exec").
+			Str("bin", cmd.Path).
+			Strs("cmd", cmd.Args).
+			Msg("Failed to execute command")
 	}
-	fmt.Println(cmd)
-	return strings.TrimSpace(out.String())
+	result := strings.TrimSpace(out.String())
+	log.Debug().
+		Str("state", "exec").
+		Str("bin", cmd.Path).
+		Strs("cmd", cmd.Args).
+		Str("result", result).
+		Msg("Failed to execute command")
+	return result
 }
 
 func getDefaultInterface() (string, net.IP, int, error) {
-	ifName := "Беспроводная сеть"
-
-	ifIndexCmd := exec.Command(
-		"powershell",
-		"-Command",
-		fmt.Sprintf("Get-NetAdapter -Name '%s' | Select-Object -First 1 -ExpandProperty InterfaceIndex", ifName),
-	)
-	ifIndexOut, err := ifIndexCmd.Output()
+	conn, err := net.Dial("udp", "8.8.8.8:53")
 	if err != nil {
-		return "", nil, 0, err
+		fmt.Println("Error:", err)
+		return "", nil, 0, nil
 	}
-	ifIndex, err := strconv.Atoi(strings.TrimSpace(string(ifIndexOut)))
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", nil, 0, err
+		fmt.Println("Error getting interfaces:", err)
+		return "", localAddr.IP, 0, nil
 	}
 
-	gatewayCmd := exec.Command(
-		"powershell",
-		"-Command",
-		"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop",
-	)
-	gatewayOut, err := gatewayCmd.Output()
-	if err != nil {
-		return "", nil, 0, err
+	for _, iface := range interfaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil {
+				continue
+			}
+			if ipnet.IP.Equal(localAddr.IP) {
+				return iface.Name, localAddr.IP, iface.Index, nil
+			}
+		}
 	}
-	gatewayIP := net.ParseIP(strings.TrimSpace(string(gatewayOut)))
-
-	return ifName, gatewayIP, ifIndex, nil
+	return "", localAddr.IP, 0, nil
 }
 
 type InterfaceAdapter interface {
@@ -171,11 +232,22 @@ func (adapter *DefaultAdapter) Index() int {
 	return adapter.IfaceIndex
 }
 
-func DumpHex(packet []byte, n int) {
-	for i := 0; i < n; i++ {
-		fmt.Printf("%02x ", packet[i])
-	}
-	fmt.Println()
-}
+func InitLogger(levelStr string) {
+	stdlog.SetOutput(io.Discard)
+	zerolog.TimeFieldFormat = time.RFC3339
 
-// SERVER NAT REQUIRED "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
+	level, err := zerolog.ParseLevel(strings.ToLower(levelStr))
+	if err != nil {
+		level = zerolog.InfoLevel
+	}
+
+	zerolog.SetGlobalLevel(level)
+
+	log.Logger = log.Output(zerolog.ConsoleWriter{
+		Out:        os.Stdout,
+		TimeFormat: "15:04:05",
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to parse log level")
+	}
+}

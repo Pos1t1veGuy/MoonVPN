@@ -2,11 +2,11 @@ package core
 
 import (
 	"fmt"
-	"log"
 	"net"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/rs/zerolog/log"
 )
 
 type Client struct {
@@ -18,42 +18,69 @@ type Client struct {
 }
 
 func (client *Client) Connect(addr string, port int) {
-	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr, port))
+	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
+	serverAddr, err := net.ResolveUDPAddr("udp", serverAddrFormatted)
 	if err != nil {
-		log.Println("failed to resolve server addr:", err)
+		log.Fatal().
+			Err(err).
+			Str("state", "connecting").
+			Str("serverAddr", serverAddrFormatted).
+			Msg("Failed to resolve server address")
 		return
 	}
 
 	localAddr, err := net.ResolveUDPAddr("udp", client.FullAddr)
 	if err != nil {
-		log.Println("failed to get UDP socket:", err)
+		log.Fatal().
+			Err(err).
+			Str("state", "connecting").
+			Str("localAddr", client.FullAddr).
+			Msg("Failed to resolve local address")
 		return
 	}
 
-	client.Conn, err = net.DialUDP("udp", nil, localAddr)
+	client.Conn, err = net.ListenUDP("udp", localAddr)
 	if err != nil {
-		log.Println("failed to listen on UDP socket:", err)
+		log.Fatal().
+			Err(err).
+			Str("state", "connecting").
+			Str("localAddr", client.FullAddr).
+			Msg("Failed to create a local server")
 		return
 	}
 	defer client.Conn.Close()
 
 	client.serverConn, err = net.DialUDP("udp", nil, serverAddr)
 	if err != nil {
-		panic(err)
+		log.Fatal().
+			Err(err).
+			Str("state", "connecting").
+			Str("serverAddr", serverAddrFormatted).
+			Msg("Failed to connect to server")
 	}
 	defer client.serverConn.Close()
 
-	log.Println("handshaking...")
+	log.Info().Str("ServerAddr", serverAddrFormatted).Msg("Connected to server")
 	client.VirtualIP, err = client.Handshake()
 	if err != nil {
-		fmt.Println("error handshaking server:", err)
+		log.Fatal().
+			Err(err).
+			Str("state", "connecting").
+			Str("serverAddr", serverAddrFormatted).
+			Msg("Failed to handshake client")
 		return
 	}
-	fmt.Println("server got IP", client.VirtualIP)
+	log.Debug().
+		Str("state", "connecting").
+		Str("IP", client.VirtualIP.String()).
+		Msg("Client connected to server")
 
-	ConfigTunnel(addr, client.CIDR, client.VirtualIP.String(), client.Interface.Name())
+	ConfigTunnel(addr, client.CIDR, client.VirtualIP.String(), client.Interface.Name(), client.WhiteList)
+	log.Info().
+		Str("state", "connecting").
+		Str("Net", client.CIDR).
+		Msg("Tunnel created")
 
-	fmt.Println("client connected")
 	go func() { // udp => interface
 		buf := make([]byte, 1500)
 		for {
@@ -64,12 +91,28 @@ func (client *Client) Connect(addr string, port int) {
 
 			packet, err := UnmarshalPacket(buf[:n])
 			if err != nil || packet.AddrType != 4 {
-				log.Printf("UnmarshalPacket IPv%d failed: %v", packet.AddrType, err)
+				log.Debug().
+					Err(err).
+					Str("state", "U2I").
+					Int("len", n).
+					Int("AddrType", int(packet.AddrType)).
+					Msg("(UDP=>Interface) Cannot unmarshal packet")
 				continue
 			}
-			fmt.Println(1111, packet)
-			DumpHex(packet.Data, len(packet.Data))
-			client.Interface.Write(packet.Data)
+			if _, err = client.Interface.Write(packet.Data); err != nil {
+				log.Debug().
+					Err(err).
+					Str("state", "U2I").
+					Int("len", n).
+					Int("AddrType", int(packet.AddrType)).
+					Msg("(UDP=>Interface) Cannot send packet")
+			} else {
+				log.Debug().
+					Str("state", "U2I").
+					Int("len", n).
+					Int("AddrType", int(packet.AddrType)).
+					Msg("(UDP=>Interface) Sent a packet")
+			}
 		}
 	}()
 
@@ -99,19 +142,38 @@ func (client *Client) Connect(addr string, port int) {
 				}
 				bytes, err := MarshalPacket(&packet)
 				if err != nil {
-					log.Println("failed to marshal packet:", err)
+					log.Debug().
+						Err(err).
+						Str("state", "I2U").
+						Int("len", n).
+						Int("AddrType", int(packet.AddrType)).
+						Msg("(UDP<=Interface) Failed to marshal packet")
+					continue
 				}
-				_, err = client.serverConn.Write(bytes)
-				if err == nil {
-					log.Println("sent packet")
+				if _, err = client.serverConn.Write(bytes); err != nil {
+					log.Debug().
+						Err(err).
+						Str("state", "I2U").
+						Int("len", n).
+						Int("AddrType", int(packet.AddrType)).
+						Msg("(UDP<=Interface) Failed to send packet")
 				} else {
-					log.Println("error sending packet", err)
+					log.Debug().
+						Str("state", "I2U").
+						Int("len", n).
+						Int("AddrType", int(packet.AddrType)).
+						Msg("(UDP<=Interface) Sent a packet")
 				}
 			}
 
 		case 6:
 			//gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv6, gopacket.NoCopy)
 			//ip6 := gop.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+			//log.Warn().
+			//	Int("len", n).
+			//	Str("state", "I2U").
+			//	Int("AddrType", int(version)).
+			//	Msg("(UDP<=Interface) IPv6 not supported")
 			continue
 
 		default:
