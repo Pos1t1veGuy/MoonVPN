@@ -48,21 +48,14 @@ func (client *Client) Connect(addr string, port int) bool {
 			Msg("Failed to connect to server")
 		return false
 	}
-	//err = client.serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if err != nil {
-		log.Error().
-			Err(err).
-			Str("state", "listening").
-			Str("serverAddr", client.ServerAddr.String()).
-			Msg("Failed setup UDP connection")
-		return false
-	}
 
 	log.Info().
 		Str("state", "connecting").
 		Str("ServerAddr", serverAddrFormatted).
 		Msg("Connecting")
+	_ = client.serverConn.SetDeadline(time.Now().Add(5 * time.Second))
 	client.VirtualIP, err = client.Handshake()
+	_ = client.serverConn.SetDeadline(time.Time{})
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -71,7 +64,7 @@ func (client *Client) Connect(addr string, port int) bool {
 			Msg("Failed to handshake client")
 		return false
 	}
-	log.Debug().
+	log.Info().
 		Str("state", "connecting").
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
