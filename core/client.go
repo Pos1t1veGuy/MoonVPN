@@ -58,7 +58,10 @@ func (client *Client) Connect(addr string, port int) bool {
 		return false
 	}
 
-	log.Info().Str("ServerAddr", serverAddrFormatted).Msg("Connecting")
+	log.Info().
+		Str("state", "connecting").
+		Str("ServerAddr", serverAddrFormatted).
+		Msg("Connecting")
 	client.VirtualIP, err = client.Handshake()
 	if err != nil {
 		log.Error().
@@ -93,7 +96,9 @@ func (client *Client) Connect(addr string, port int) bool {
 }
 
 func (client *Client) Listen() {
-	defer log.Info().Msg("Client disconnected")
+	defer log.Info().
+		Str("state", "listening").
+		Msg("Client disconnected")
 	defer client.serverConn.Close()
 	defer client.Tunnel.Stop()
 

@@ -169,14 +169,22 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				// add absolute route to interface
 				ExecCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", "0.0.0.0", "metric", "1",
 					"if", strconv.Itoa(curIface.Index))
+				log.Info().
+					Str("state", "configTunnel").
+					Msg("Routed all IPs into tunnel")
 			} else {
-				for _, addr := range tunnel.Whitelist { // TODO: make DNS resolver
+				for _, addr := range tunnel.Whitelist {
 					ip := net.ParseIP(addr)
 					if ip != nil && ip.IsGlobalUnicast() {
 						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
 							"if", strconv.Itoa(curIface.Index))
+						log.Info().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Routed IP into tunnel")
 					} else {
 						log.Error().
+							Str("state", "configTunnel").
 							Str("addr", addr).
 							Msg("Failed to parse IP address")
 					}
@@ -326,6 +334,9 @@ func InitLogger(levelStr string) {
 
 	log.Logger = log.Output(&SyncWriter{w: cw})
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to parse log level")
+		log.Error().
+			Str("state", "logSetup").
+			Err(err).
+			Msg("Failed to parse log level")
 	}
 }

@@ -252,11 +252,14 @@ func (server *Server) Start() {
 			}
 
 			log.Info().
+				Str("state", "closing").
 				Str("peer", peer.Addr.String()).
 				Msg("disconnect packet sent")
 		}
 	}
-	log.Info().Msg("Server closed")
+	log.Info().
+		Str("state", "closing").
+		Msg("Server closed")
 }
 
 type Network struct {
