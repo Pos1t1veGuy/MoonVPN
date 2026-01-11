@@ -19,6 +19,7 @@ type Client struct {
 	serverConn *net.UDPConn
 	WhiteList  []string
 	Interface  InterfaceAdapter
+	Tunnel     *Tunnel
 	Stopping   chan struct{}
 
 	Ping *Ping
@@ -28,6 +29,9 @@ type Client struct {
 func (client *Client) Connect(addr string, port int) bool {
 	var err error
 	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
+	client.Tunnel = NewTunnel(addr, client.CIDR, client.Interface.Name(), client.WhiteList)
+	client.Tunnel.Stop() // clear broken routes
+
 	client.ServerAddr, err = net.ResolveUDPAddr("udp", serverAddrFormatted)
 	if err != nil {
 		log.Fatal().
@@ -39,28 +43,39 @@ func (client *Client) Connect(addr string, port int) bool {
 
 	client.serverConn, err = net.DialUDP("udp", nil, client.ServerAddr)
 	if err != nil {
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "listening").
 			Str("serverAddr", client.ServerAddr.String()).
 			Msg("Failed to connect to server")
+		return false
+	}
+	//err = client.serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("state", "listening").
+			Str("serverAddr", client.ServerAddr.String()).
+			Msg("Failed setup UDP connection")
+		return false
 	}
 
 	log.Info().Str("ServerAddr", serverAddrFormatted).Msg("Connecting")
 	client.VirtualIP, err = client.Handshake()
 	if err != nil {
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "connecting").
 			Str("serverAddr", serverAddrFormatted).
 			Msg("Failed to handshake client")
+		return false
 	}
 	log.Debug().
 		Str("state", "connecting").
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
-	err = ConfigTunnel(addr, client.CIDR, client.VirtualIP.String(), client.Interface.Name(), client.WhiteList)
+	err = client.Tunnel.Start(client.VirtualIP.String())
 	if err != nil {
 		return false
 	}
@@ -75,8 +90,14 @@ func (client *Client) Connect(addr string, port int) bool {
 func (client *Client) Listen() {
 	defer log.Info().Msg("Client disconnected")
 	defer client.serverConn.Close()
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer client.Tunnel.Stop()
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+		<-c
+		client.Stop("Ctrl+C pressed")
+	}()
 
 	localAddr, err := net.ResolveUDPAddr("udp", client.FullAddr)
 	if err != nil {
@@ -97,12 +118,18 @@ func (client *Client) Listen() {
 	}
 	defer client.Conn.Close()
 
-	go client.PingLoop(10 * time.Second)
+	go client.PingLoop(5 * time.Second)
 
 	// udp => interface
 	go func() {
 		buf := make([]byte, 1500)
 		for {
+			select {
+			case <-client.Stopping:
+				return
+			default:
+			}
+
 			n, err := client.serverConn.Read(buf)
 			if err != nil || n == 0 {
 				continue
@@ -149,6 +176,12 @@ func (client *Client) Listen() {
 	go func() {
 		buffer := make([]byte, 1500)
 		for {
+			select {
+			case <-client.Stopping:
+				return
+			default:
+			}
+
 			n, err := client.Interface.Read(buffer)
 			if err != nil || n == 0 {
 				continue
@@ -212,7 +245,7 @@ func (client *Client) Listen() {
 		}
 	}()
 
-	<-sigs // waiting for Ctrl+C
+	<-client.Stopping
 	SendPacket(client.serverConn, MakeDisconnectPacket(client.ServerAddr.IP, client.IP))
 }
 
@@ -228,12 +261,35 @@ func (client *Client) Stop(msg string) {
 
 func (client *Client) PingLoop(duration time.Duration) {
 	packet := MakePingPacket(client.IP, client.ServerAddr.IP)
+	attempts := 0
+
 	for {
+		client.Ping.Start()
 		SendPacket(client.serverConn, packet)
-		if client.Ping.Calculated {
-			client.Ping.Start()
-		}
+		log.Debug().
+			Str("state", "ping").
+			Msg("Ping server")
+
 		time.Sleep(duration)
+
+		if !client.Ping.Response {
+			if attempts < 3 {
+				attempts++
+				log.Error().
+					Str("state", "ping").
+					Int("try", attempts).
+					Msg("Server did not respond to ping request")
+			} else {
+				log.Error().
+					Str("state", "ping").
+					Int("try", attempts).
+					Msg("Server did not respond to ping request. Closing connection")
+				client.Stop("Server stopped responding")
+				return
+			}
+		} else {
+			attempts = 0
+		}
 	}
 }
 

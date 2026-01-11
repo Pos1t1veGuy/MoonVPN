@@ -22,6 +22,7 @@ type Server struct {
 	Network       *Network
 	AnonymousPeer *Peer
 	Interface     InterfaceAdapter
+	Tunnel        *Tunnel
 	Endpoint
 }
 
@@ -57,6 +58,7 @@ func (server *Server) Start() {
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
+	server.Tunnel = NewTunnel("", server.CIDR, "gotun0", []string{})
 
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {
@@ -82,10 +84,11 @@ func (server *Server) Start() {
 		Str("addr", server.FullAddr).
 		Msg("VPN server listening")
 
-	err = ConfigTunnel("", server.CIDR, interfaceIP.String(), "gotun0", []string{})
+	err = server.Tunnel.Start(interfaceIP.String())
 	if err != nil {
 		return
 	}
+	defer server.Tunnel.Stop()
 
 	log.Info().
 		Str("state", "starting").
@@ -134,6 +137,7 @@ func (server *Server) Start() {
 
 					if _, err = server.Conn.WriteToUDP(bytes, v.(*net.UDPAddr)); err != nil {
 						log.Debug().
+							Err(err).
 							Str("state", "I2U").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
@@ -182,7 +186,6 @@ func (server *Server) Start() {
 		for {
 			n, clientAddr, err := server.Conn.ReadFromUDP(buf)
 			if err != nil || n == 0 {
-				log.Printf("udp read error: %v", err)
 				continue
 			}
 			var version int
@@ -242,16 +245,15 @@ func (server *Server) Start() {
 						Int("addrType", version).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
-						Msg("(UDP=>Interface) Sent a packet")
+						Msg("(UDP=>Interface) Failed to send packet")
 				} else {
 					log.Debug().
-						Err(err).
 						Int("len", n).
 						Str("state", "U2I").
 						Int("addrType", version).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
-						Msg("(UDP=>Interface) Failed to send packet")
+						Msg("(UDP=>Interface) Sent a packet")
 				}
 			} else {
 				log.Debug().

@@ -12,10 +12,17 @@ import (
 )
 
 func (client *Client) Handshake() (net.IP, error) {
-	_, err := client.serverConn.Write([]byte{0x01, 0x01})
+	packet := MakeDefaultPacket(net.ParseIP("0.0.0.0"), client.ServerAddr.IP, []byte{0x01, 0x01})
+	clientHello, err := MarshalPacket(packet)
 
 	if err != nil {
-		return nil, fmt.Errorf("udp send error: %v", err)
+		return nil, err
+	}
+
+	_, err = client.serverConn.Write(clientHello)
+
+	if err != nil {
+		return nil, err
 	}
 
 	buf := make([]byte, 1024)
@@ -23,34 +30,46 @@ func (client *Client) Handshake() (net.IP, error) {
 	for {
 		n, err := client.serverConn.Read(buf)
 		if err != nil {
-			return net.IP(buf[2:6]), fmt.Errorf("udp read error: %v", err)
+			return nil, err
+		}
+		packet, err := UnmarshalPacket(buf[:n])
+		if err != nil {
+			return nil, err
 		}
 
-		if n < 6 {
+		if packet.Len() < 2 {
 			continue
 		}
 
-		if buf[0] != 0x02 || buf[1] != 0x00 {
+		if packet.Data[0] != 0x02 || packet.Data[1] != 0x00 {
 			continue
 		}
 
-		ip := net.IP(buf[2:6])
-		if ip.Equal(net.IPv4zero) {
+		if packet.DstIP.Equal(net.IPv4zero) {
 			return nil, errors.New("server returned zero IP")
 		}
 
-		return ip, nil
+		return packet.DstIP, nil
 	}
 }
 
 func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, error) {
-	if n >= 2 && buf[0] == 0x01 && buf[1] == 0x01 {
+	packet, err := UnmarshalPacket(buf[:n])
+	if err != nil {
+		return nil, err
+	}
+
+	if packet.Len() >= 2 && packet.Data[0] == 0x01 && packet.Data[1] == 0x01 {
 		virtualIP, err := server.Network.Next()
 		if err != nil {
 			return server.AnonymousPeer, fmt.Errorf("get next virtual ip failed: %v", err)
 		}
 
-		resp := append([]byte{0x02, 0x00}, virtualIP.To4()...)
+		packetResp := MakeDefaultPacket(server.IP, virtualIP, []byte{0x02, 0x00})
+		resp, err := MarshalPacket(packetResp)
+		if err != nil {
+			return server.AnonymousPeer, fmt.Errorf("marshal packet failed: %v", err)
+		}
 		_, err = server.Conn.WriteToUDP(resp, addr)
 		if err != nil {
 			return server.AnonymousPeer, fmt.Errorf("handshake response error: %v", err)
@@ -74,6 +93,10 @@ type Packet struct {
 	Rsv      [4]byte
 	Length   uint16
 	Data     []byte
+}
+
+func (packet *Packet) Len() int {
+	return len(packet.Data)
 }
 
 func MarshalPacket(p *Packet) ([]byte, error) {
@@ -213,10 +236,32 @@ func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet
 			client.Stop("Server disconnected you")
 		case [4]byte{0, 0, 0, 1}: // pong
 			client.Ping.Calculate()
+			log.Info().
+				Str("state", "API").
+				Str("ping", client.Ping.Value.Truncate(time.Millisecond).String()).
+				Msg("Pong received")
 		}
 		return true
 	}
 	return false
+}
+
+func MakeDefaultPacket(senderAddr net.IP, receiverAddr net.IP, data []byte) *Packet {
+	var version int
+	if senderAddr.To4() != nil {
+		version = 4
+	} else {
+		version = 6
+	}
+	return &Packet{
+		Type:     0,
+		AddrType: byte(version),
+		SrcIP:    senderAddr,
+		DstIP:    receiverAddr,
+		Rsv:      [4]byte{0, 0, 0, 0},
+		Length:   uint16(len(data)),
+		Data:     data,
+	}
 }
 
 func MakeDisconnectPacket(serverAddr net.IP, clientAddr net.IP) *Packet {
@@ -266,7 +311,7 @@ type Ping struct {
 }
 
 func NewPing(threshold time.Duration) *Ping {
-	return &Ping{Threshold: threshold}
+	return &Ping{Threshold: threshold, Response: true}
 }
 func (ping *Ping) Start() {
 	ping.mu.Lock()
@@ -294,5 +339,6 @@ func (ping *Ping) Calculate() time.Duration {
 	defer ping.mu.Unlock()
 	ping.Calculated = true
 	ping.Value = time.Since(ping.TimeStart)
+	ping.Response = true
 	return ping.Value
 }

@@ -50,13 +50,32 @@ func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 	}
 }
 
-func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, IfaceName string, whitelist []string) error {
-	ip, ipNet, err := net.ParseCIDR(netCidr)
+type Tunnel struct {
+	DestinationIP string
+	Whitelist     []string
+	IfaceName     string
+	InterfaceIP   string
+	NetCIDR       string
+}
+
+func NewTunnel(destinationIP string, netCidr string, IfaceName string, whitelist []string) *Tunnel {
+	return &Tunnel{
+		DestinationIP: destinationIP,
+		Whitelist:     whitelist,
+		IfaceName:     IfaceName,
+		NetCIDR:       netCidr,
+	}
+}
+
+func (tunnel *Tunnel) Start(interfaceIP string) error {
+	tunnel.InterfaceIP = interfaceIP
+
+	ip, ipNet, err := net.ParseCIDR(tunnel.NetCIDR)
 	if err != nil {
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
-			Str("CIDR", netCidr).
+			Str("CIDR", tunnel.NetCIDR).
 			Msg("Failed to parse CIDR")
 		return err
 	}
@@ -76,51 +95,52 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 		Str("name", defIfaceName).
 		Str("ip", defIfaceIP.String()).
 		Msg("Default adapter info")
-	curIface, err := net.InterfaceByName(IfaceName)
+	curIface, err := net.InterfaceByName(tunnel.IfaceName)
 	if err != nil {
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
-			Str("ifaceName", IfaceName).
+			Str("ifaceName", tunnel.IfaceName).
 			Msg("Failed to get VPN interface")
 		return err
 	}
 	log.Debug().
 		Str("state", "configTunnel").
 		Int("index", curIface.Index).
-		Str("name", IfaceName).
+		Str("name", tunnel.IfaceName).
 		Msg("VPN adapter info")
 
 	// destinationIP only for client to exclude server IP in routes
 	switch runtime.GOOS {
-	case "linux":
-		if destinationIP != "" { // client
+	case "linux": // TODO: make white lists
+		if tunnel.DestinationIP != "" { // client
 			// excluding route to remove connection loop
-			ExecCmd("ip", "route", "add", destinationIP, "dev", "eth0")
+			ExecCmd("ip", "route", "add", tunnel.DestinationIP, "dev", "eth0")
 		} else { // server
 			// enable NAT
 			ExecCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
-			ExecCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", netCidr, "-o", "eth0", "-j", "MASQUERADE")
+			ExecCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", tunnel.NetCIDR, "-o", "eth0", "-j", "MASQUERADE")
 		}
 
 		ifaceMaskOnes, _ := ipNet.Mask.Size()
 		// tun interface off
-		ExecCmd("ip", "link", "set", "dev", IfaceName, "down")
+		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "down")
 		// clear old IPs
-		ExecCmd("ip", "addr", "flush", "dev", IfaceName)
+		ExecCmd("ip", "addr", "flush", "dev", tunnel.IfaceName)
 		// make interface net
-		ExecCmd("ip", "addr", "add", fmt.Sprintf("%s/%d", interfaceIP, ifaceMaskOnes), "dev", IfaceName)
+		ExecCmd("ip", "addr", "add",
+			fmt.Sprintf("%s/%d", tunnel.InterfaceIP, ifaceMaskOnes), "dev", tunnel.IfaceName)
 		// set mtu
-		ExecCmd("ip", "link", "set", "dev", IfaceName, "mtu", "1500")
+		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "mtu", "1500")
 		// turn interface on
-		ExecCmd("ip", "link", "set", "dev", IfaceName, "up")
+		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "up")
 
 		//ExecCmd("ip", "route", "add", "1.1.1.1", "dev", IfaceName) // dns
 	case "darwin":
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
-			Str("CIDR", netCidr).
+			Str("CIDR", tunnel.NetCIDR).
 			Msg("Darwin not yet supported")
 		return errors.New("darwin not yet supported")
 	case "windows":
@@ -129,20 +149,28 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 
 		// set interface IP
 		ExecCmd("cmd", "/C", fmt.Sprintf(`netsh interface ipv4 set address name="%s" static %s mask=%s`,
-			IfaceName, interfaceIP, ifaceMask))
+			tunnel.IfaceName, tunnel.InterfaceIP, ifaceMask))
 		// set metric to interface
 		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
 
-		if destinationIP != "" { // client
-			if len(whitelist) == 0 {
+		if tunnel.DestinationIP != "" { // client
+			if len(tunnel.Whitelist) == 0 {
 				// excluding route to remove connection loop
-				ExecCmd("route", "add", destinationIP, "mask", "255.255.255.255", defIfaceIP.String(),
+				defGatewayIP, err := getDefaultGatewayWindows()
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("state", "configTunnel").
+						Msg("Can not get default gateway")
+				}
+
+				ExecCmd("route", "add", tunnel.DestinationIP, "mask", "255.255.255.255", defGatewayIP.String(),
 					"metric", "1", "if", strconv.Itoa(defIfaceIndex))
 				// add absolute route to interface
 				ExecCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", "0.0.0.0", "metric", "1",
 					"if", strconv.Itoa(curIface.Index))
 			} else {
-				for _, addr := range whitelist { // TODO: make DNS resolver
+				for _, addr := range tunnel.Whitelist { // TODO: make DNS resolver
 					ip := net.ParseIP(addr)
 					if ip != nil && ip.IsGlobalUnicast() {
 						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
@@ -164,6 +192,17 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 		return fmt.Errorf("not support os:%v", runtime.GOOS)
 	}
 	return nil
+}
+
+func (tunnel *Tunnel) Stop() {
+	if tunnel.DestinationIP != "" && len(tunnel.Whitelist) != 0 {
+		switch runtime.GOOS {
+		case "windows":
+			ExecCmd("route", "delete", tunnel.DestinationIP)
+		case "linux":
+			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
+		}
+	}
 }
 
 func ExecCmd(c string, args ...string) string {
@@ -191,7 +230,6 @@ func ExecCmd(c string, args ...string) string {
 func getDefaultInterface() (string, net.IP, int, error) {
 	conn, err := net.Dial("udp", "8.8.8.8:53")
 	if err != nil {
-		fmt.Println("Error:", err)
 		return "", nil, 0, nil
 	}
 	defer conn.Close()
@@ -200,7 +238,6 @@ func getDefaultInterface() (string, net.IP, int, error) {
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		fmt.Println("Error getting interfaces:", err)
 		return "", localAddr.IP, 0, nil
 	}
 
@@ -217,6 +254,28 @@ func getDefaultInterface() (string, net.IP, int, error) {
 		}
 	}
 	return "", localAddr.IP, 0, nil
+}
+
+func getDefaultGatewayWindows() (net.IP, error) {
+	out, err := exec.Command("cmd", "/C", "route print 0.0.0.0").Output()
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 &&
+			fields[0] == "0.0.0.0" &&
+			fields[1] == "0.0.0.0" {
+
+			gw := net.ParseIP(fields[2]).To4()
+			if gw != nil && gw[0] == 192 && gw[1] == 168 {
+				return gw, nil
+			}
+		}
+	}
+	return nil, errors.New("default gateway not found")
 }
 
 type InterfaceAdapter interface {

@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/Pos1t1veGuy/MoonVPN/core"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
@@ -32,6 +33,13 @@ func main() {
 
 	core.InitLogger(*logLevel)
 	cl := core.NewWindowsClient(*appHost, *appPort, []string{}, "10.0.0.1/24")
-	cl.Connect(*serHost, *serPort)
-	cl.Listen()
+	connected := cl.Connect(*serHost, *serPort)
+	if connected == true {
+		cl.Listen()
+	} else {
+		log.Fatal().
+			Str("host", *serHost).
+			Int("port", *serPort).
+			Msg("Can not connect to server")
+	}
 }
