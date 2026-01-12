@@ -53,15 +53,19 @@ func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 type Tunnel struct {
 	DestinationIP string
 	Whitelist     []string
+	Blacklist     []string
 	IfaceName     string
 	InterfaceIP   string
 	NetCIDR       string
+
+	bypassingIPs []string
 }
 
-func NewTunnel(destinationIP string, netCidr string, IfaceName string, whitelist []string) *Tunnel {
+func NewTunnel(destinationIP string, netCidr string, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
 	return &Tunnel{
 		DestinationIP: destinationIP,
 		Whitelist:     whitelist,
+		Blacklist:     blacklist,
 		IfaceName:     IfaceName,
 		NetCIDR:       netCidr,
 	}
@@ -172,10 +176,28 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				log.Info().
 					Str("state", "configTunnel").
 					Msg("Routed all IPs into tunnel")
+
+				for _, addr := range tunnel.Blacklist {
+					ip := net.ParseIP(addr)
+					if ip != nil && ip.IsGlobalUnicast() && addr != tunnel.DestinationIP {
+						ExecCmd("route", "add", addr, "mask", "255.255.255.255", defGatewayIP.String(), "metric", "1",
+							"if", strconv.Itoa(defIfaceIndex))
+						log.Info().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Routed bypassing the tunnel")
+						tunnel.bypassingIPs = append(tunnel.bypassingIPs, addr)
+					} else {
+						log.Error().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Failed to parse IP address")
+					}
+				}
 			} else {
 				for _, addr := range tunnel.Whitelist {
 					ip := net.ParseIP(addr)
-					if ip != nil && ip.IsGlobalUnicast() {
+					if ip != nil && ip.IsGlobalUnicast() && !contains(tunnel.Blacklist, addr) {
 						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
 							"if", strconv.Itoa(curIface.Index))
 						log.Info().
@@ -207,8 +229,15 @@ func (tunnel *Tunnel) Stop() {
 		switch runtime.GOOS {
 		case "windows":
 			ExecCmd("route", "delete", tunnel.DestinationIP)
+			for _, addr := range tunnel.bypassingIPs {
+				ExecCmd("route", "delete", addr)
+				fmt.Println(addr, "deleted")
+			}
 		case "linux":
 			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
+			for _, addr := range tunnel.bypassingIPs {
+				ExecCmd("ip", "route", "del", addr)
+			}
 		}
 	}
 }
@@ -339,4 +368,13 @@ func InitLogger(levelStr string) {
 			Err(err).
 			Msg("Failed to parse log level")
 	}
+}
+
+func contains(slice []string, str string) bool {
+	for _, s := range slice {
+		if s == str {
+			return true
+		}
+	}
+	return false
 }

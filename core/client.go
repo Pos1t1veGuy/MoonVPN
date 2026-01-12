@@ -18,6 +18,7 @@ type Client struct {
 	VirtualIP  net.IP
 	serverConn *net.UDPConn
 	WhiteList  []string
+	BlackList  []string
 	Interface  InterfaceAdapter
 	Tunnel     *Tunnel
 	Stopping   chan struct{}
@@ -73,7 +74,7 @@ func (client *Client) Connect(addr string, port int) bool {
 	virtualIP4[3] = 0
 
 	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
-	client.Tunnel = NewTunnel(addr, client.CIDR, client.Interface.Name(), client.WhiteList)
+	client.Tunnel = NewTunnel(addr, client.CIDR, client.Interface.Name(), client.WhiteList, client.BlackList)
 	client.Tunnel.Stop() // clear broken routes
 	err = client.Tunnel.Start(client.VirtualIP.String())
 

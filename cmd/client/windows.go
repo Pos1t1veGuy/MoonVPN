@@ -30,6 +30,11 @@ func main() {
 		"whitelist.txt",
 		"path to whitelist file",
 	)
+	blPath := flag.String(
+		"blacklist",
+		"blacklist.txt",
+		"path to blacklist file",
+	)
 	flag.Parse()
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
@@ -38,7 +43,8 @@ func main() {
 	}
 	core.InitLogger(*logLevel)
 
-	whitelist, err := loadWhitelist(*wlPath)
+	whitelist, err := loadListFile(*wlPath, "# Place IPs line by line to exclude them from routing.\n"+
+		"# Don't enter IP addresses if you want to route all system traffic.\n\n")
 	if err != nil {
 		log.Fatal().
 			Err(err).
@@ -46,8 +52,16 @@ func main() {
 			Str("path", *wlPath).
 			Msg("Failed to load whitelist")
 	}
+	blacklist, err := loadListFile(*blPath, "# Place IPs line by line to include them to routing.\n\n")
+	if err != nil {
+		log.Fatal().
+			Err(err).
+			Str("state", "whiteListSetup").
+			Str("path", *blPath).
+			Msg("Failed to load whitelist")
+	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist)
+	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist)
 	connected := cl.Connect(*serHost, *serPort)
 	if connected == true {
 		cl.Listen()
@@ -60,8 +74,8 @@ func main() {
 	}
 }
 
-func loadWhitelist(path string) ([]string, error) {
-	if err := ensureWhitelistFile(path); err != nil {
+func loadListFile(path string, defaultContent string) ([]string, error) {
+	if err := ensureListFile(path, defaultContent); err != nil {
 		return nil, err
 	}
 
@@ -89,12 +103,12 @@ func loadWhitelist(path string) ([]string, error) {
 	return whitelist, nil
 }
 
-func ensureWhitelistFile(path string) error {
+func ensureListFile(path string, content string) error {
 	_, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		err = os.WriteFile(path, []byte{}, 0644)
+		err = os.WriteFile(path, []byte(content), 0644)
 		if err != nil {
-			return fmt.Errorf("failed to create whitelist file: %w", err)
+			return fmt.Errorf("failed to create file: %w", err)
 		}
 	}
 	return err

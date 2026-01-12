@@ -58,7 +58,7 @@ func (server *Server) Start() {
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
-	server.Tunnel = NewTunnel("", server.CIDR, "gotun0", []string{})
+	server.Tunnel = NewTunnel("", server.CIDR, "gotun0", []string{}, []string{})
 
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {
@@ -199,17 +199,16 @@ func (server *Server) Start() {
 			}
 
 			packet, err := UnmarshalPacket(buf[:n])
+			if err != nil || packet.AddrType != 4 {
+				log.Debug().
+					Err(err).
+					Int("len", n).
+					Str("state", "U2I").
+					Int("addrType", version).
+					Msg("(UDP=>Interface) Failed to marshal packet")
+				continue
+			}
 			if !server.PacketAPI(*server.Conn, *clientAddr, packet) {
-				if err != nil || packet.AddrType != 4 {
-					log.Debug().
-						Err(err).
-						Int("len", n).
-						Str("state", "U2I").
-						Int("addrType", version).
-						Msg("(UDP=>Interface) Failed to marshal packet")
-					continue
-				}
-
 				if _, err := server.Interface.Write(packet.Data); err != nil {
 					log.Debug().
 						Err(err).
