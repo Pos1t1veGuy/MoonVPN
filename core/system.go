@@ -118,8 +118,56 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 	switch runtime.GOOS {
 	case "linux": // TODO: make white lists
 		if tunnel.DestinationIP != "" { // client
-			// excluding route to remove connection loop
-			ExecCmd("ip", "route", "add", tunnel.DestinationIP, "dev", "eth0")
+			if len(tunnel.Whitelist) == 0 {
+				defGatewayIP, err := getDefaultGatewayLinux()
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("state", "configTunnel").
+						Msg("Cannot get default gateway")
+				}
+
+				// excluding route to remove connection loop
+				ExecCmd("ip", "route", "add", tunnel.DestinationIP, "dev", tunnel.IfaceName)
+				// Route all
+				ExecCmd("ip", "route", "add", "default", "dev", tunnel.IfaceName)
+
+				log.Info().
+					Str("state", "configTunnel").
+					Msg("Routed all IPs into tunnel")
+
+				for _, addr := range tunnel.Blacklist {
+					ip := net.ParseIP(addr)
+					if ip != nil && ip.IsGlobalUnicast() && addr != tunnel.DestinationIP {
+						ExecCmd("ip", "route", "add", addr, "via", defGatewayIP.String(), "dev", "eth0")
+						log.Info().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Routed bypassing the tunnel")
+						tunnel.bypassingIPs = append(tunnel.bypassingIPs, addr)
+					} else {
+						log.Error().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Failed to parse IP address")
+					}
+				}
+			}
+			for _, addr := range tunnel.Whitelist {
+				ip := net.ParseIP(addr)
+				if ip != nil && ip.IsGlobalUnicast() && !contains(tunnel.Blacklist, addr) {
+					ExecCmd("ip", "route", "add", addr, "dev", tunnel.IfaceName)
+					log.Info().
+						Str("state", "configTunnel").
+						Str("addr", addr).
+						Msg("Routed IP into tunnel")
+				} else {
+					log.Error().
+						Str("state", "configTunnel").
+						Str("addr", addr).
+						Msg("Failed to parse IP address")
+				}
+			}
 		} else { // server
 			// enable NAT
 			ExecCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
@@ -194,22 +242,21 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 							Msg("Failed to parse IP address")
 					}
 				}
-			} else {
-				for _, addr := range tunnel.Whitelist {
-					ip := net.ParseIP(addr)
-					if ip != nil && ip.IsGlobalUnicast() && !contains(tunnel.Blacklist, addr) {
-						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
-							"if", strconv.Itoa(curIface.Index))
-						log.Info().
-							Str("state", "configTunnel").
-							Str("addr", addr).
-							Msg("Routed IP into tunnel")
-					} else {
-						log.Error().
-							Str("state", "configTunnel").
-							Str("addr", addr).
-							Msg("Failed to parse IP address")
-					}
+			}
+			for _, addr := range tunnel.Whitelist {
+				ip := net.ParseIP(addr)
+				if ip != nil && ip.IsGlobalUnicast() && !contains(tunnel.Blacklist, addr) {
+					ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
+						"if", strconv.Itoa(curIface.Index))
+					log.Info().
+						Str("state", "configTunnel").
+						Str("addr", addr).
+						Msg("Routed IP into tunnel")
+				} else {
+					log.Error().
+						Str("state", "configTunnel").
+						Str("addr", addr).
+						Msg("Failed to parse IP address")
 				}
 			}
 		}
@@ -229,13 +276,13 @@ func (tunnel *Tunnel) Stop() {
 		switch runtime.GOOS {
 		case "windows":
 			ExecCmd("route", "delete", tunnel.DestinationIP)
-			for _, addr := range tunnel.bypassingIPs {
+			for _, addr := range tunnel.Blacklist {
 				ExecCmd("route", "delete", addr)
 				fmt.Println(addr, "deleted")
 			}
 		case "linux":
 			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
-			for _, addr := range tunnel.bypassingIPs {
+			for _, addr := range tunnel.Blacklist {
 				ExecCmd("ip", "route", "del", addr)
 			}
 		}
@@ -246,6 +293,7 @@ func ExecCmd(c string, args ...string) string {
 	cmd := exec.Command(c, args...)
 	var out bytes.Buffer
 	err := cmd.Run()
+	cmd.Stdout = &out
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -313,6 +361,28 @@ func getDefaultGatewayWindows() (net.IP, error) {
 		}
 	}
 	return nil, errors.New("default gateway not found")
+}
+
+func getDefaultGatewayLinux() (net.IP, error) {
+	cmd := exec.Command("ip", "route", "show", "default")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run 'ip route': %w", err)
+	}
+
+	lines := bytes.Split(out, []byte("\n"))
+	for _, line := range lines {
+		fields := strings.Fields(string(line))
+		for i, f := range fields {
+			if f == "via" && i+1 < len(fields) {
+				gw := net.ParseIP(fields[i+1])
+				if gw != nil {
+					return gw, nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("default gateway not found")
 }
 
 type InterfaceAdapter interface {
