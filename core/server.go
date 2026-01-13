@@ -94,6 +94,7 @@ func (server *Server) StartUnsafe() {
 		Str("state", "starting").
 		Str("serverAddr", server.FullAddr).
 		Msg("Tunnel started")
+	defer server.DisconnectAll()
 
 	// udp <= interface
 	go func() {
@@ -271,6 +272,33 @@ func (server *Server) Start() {
 	}()
 
 	server.StartUnsafe()
+}
+
+func (server *Server) DisconnectAll() {
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+
+	for _, peer := range server.Peers {
+		if peer == nil || peer.Addr == nil {
+			continue
+		}
+
+		packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("state", "closing").
+				Str("peer", peer.Addr.String()).
+				Msg("Failed to create disconnect packet")
+			continue
+		}
+
+		server.SendPacket(packet, peer.Addr)
+		log.Info().
+			Str("state", "closing").
+			Str("peer", peer.Addr.String()).
+			Msg("Disconnect packet sent")
+	}
 }
 
 type Network struct {
