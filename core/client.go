@@ -102,7 +102,7 @@ func (client *Client) Connect(addr string, port int) bool {
 	return true
 }
 
-func (client *Client) Listen() {
+func (client *Client) ListenUnsafe() {
 	defer log.Info().
 		Str("state", "listening").
 		Msg("Client disconnected")
@@ -137,8 +137,7 @@ func (client *Client) Listen() {
 
 	go client.PingLoop(5 * time.Second)
 
-	// udp => interface
-	go func() {
+	go funcSafe("UDP=>Interface", func() {
 		buf := make([]byte, 1500)
 		for {
 			select {
@@ -187,10 +186,9 @@ func (client *Client) Listen() {
 					Msg("(UDP=>Interface) Got API packet")
 			}
 		}
-	}()
+	}, true)
 
-	// interface => udp
-	go func() {
+	go funcSafe("UDP<=Interface", func() {
 		buffer := make([]byte, 1500)
 		for {
 			select {
@@ -262,13 +260,17 @@ func (client *Client) Listen() {
 				continue
 			}
 		}
-	}()
+	}, true)
 
 	<-client.Stopping
 	packet, err := MakeDisconnectPacket(client.ServerAddr.IP, client.IP)
 	if err != nil {
 		client.SendPacket(packet)
 	}
+}
+
+func (client *Client) Listen() {
+	funcSafe("mainLoop", client.ListenUnsafe, false)
 }
 
 func (client *Client) Stop(msg string) {

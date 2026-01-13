@@ -54,7 +54,7 @@ func (server *Server) StartUnsafe() {
 	if err != nil {
 		log.Fatal().
 			Err(err).
-			Str("state", "configTunnel").
+			Str("state", "starting").
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
@@ -96,8 +96,7 @@ func (server *Server) StartUnsafe() {
 		Msg("Tunnel started")
 	defer server.DisconnectAll()
 
-	// udp <= interface
-	go func() {
+	go funcSafe("UDP<=Interface", func() {
 		buffer := make([]byte, 1500)
 		var key string
 		for {
@@ -152,10 +151,9 @@ func (server *Server) StartUnsafe() {
 				continue
 			}
 		}
-	}()
+	}, true)
 
-	// udp => interface
-	go func() {
+	go funcSafe("UDP=>Interface", func() {
 		buf := make([]byte, 1500)
 		for {
 			n, clientAddr, err := server.Conn.ReadFromUDP(buf)
@@ -242,7 +240,7 @@ func (server *Server) StartUnsafe() {
 			key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
 			server.Cache.Set(key, clientAddr, cache.DefaultExpiration)
 		}
-	}()
+	}, true)
 
 	<-sigs // waiting for Ctrl+C
 	for _, peer := range server.Peers {
@@ -264,14 +262,7 @@ func (server *Server) StartUnsafe() {
 }
 
 func (server *Server) Start() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Error().Msgf("Server panicked: %v", r)
-			go server.Start()
-		}
-	}()
-
-	server.StartUnsafe()
+	funcSafe("mainLoop", server.StartUnsafe, false)
 }
 
 func (server *Server) DisconnectAll() {

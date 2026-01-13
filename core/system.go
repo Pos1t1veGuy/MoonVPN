@@ -491,3 +491,25 @@ func contains(slice []string, str string) bool {
 	}
 	return false
 }
+
+func funcSafe(name string, fn func(), autoRestart bool) {
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if autoRestart {
+					funcSafe(name, fn, autoRestart)
+					log.Error().
+						Str("goroutine", name).
+						Interface("panic", r).
+						Msg("goroutine panicked, restarting")
+				} else {
+					log.Error().
+						Str("goroutine", name).
+						Interface("panic", r).
+						Msg("goroutine panicked and disabled")
+				}
+			}
+		}()
+		fn()
+	}()
+}
