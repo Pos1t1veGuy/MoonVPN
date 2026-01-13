@@ -54,23 +54,36 @@ func (client *Client) Connect(addr string, port int) bool {
 		Str("state", "connecting").
 		Str("ServerAddr", serverAddrFormatted).
 		Msg("Connecting")
-	_ = client.serverConn.SetDeadline(time.Now().Add(5 * time.Second))
-	client.VirtualIP, err = client.Handshake()
-	_ = client.serverConn.SetDeadline(time.Time{})
-	if err != nil {
-		log.Error().
+
+	_ = client.serverConn.SetDeadline(time.Now().Add(3 * time.Second))
+	var virtualIP net.IP
+	for attempt := 1; attempt <= 3; attempt++ {
+		virtualIP, err = client.Handshake()
+		if err == nil {
+			break
+		}
+		log.Warn().
 			Err(err).
 			Str("state", "connecting").
-			Str("serverAddr", serverAddrFormatted).
-			Msg("Failed to handshake client")
+			Int("attempt", attempt).
+			Msg("Handshake failed, retrying...")
+		time.Sleep(1 * time.Second)
+	}
+	if err != nil {
+		log.Error().
+			Str("state", "connecting").
+			Msg("All handshake attempts failed. Server is unavailable")
 		return false
 	}
+	client.VirtualIP = virtualIP
+	_ = client.serverConn.SetDeadline(time.Time{})
 	log.Info().
 		Str("state", "connecting").
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
-	virtualIP4 := client.VirtualIP.To4()
+	virtualIP4 := make(net.IP, len(client.VirtualIP))
+	copy(virtualIP4, client.VirtualIP)
 	virtualIP4[3] = 0
 
 	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
@@ -145,7 +158,7 @@ func (client *Client) Listen() {
 					Err(err).
 					Str("state", "U2I").
 					Int("len", n).
-					Int("AddrType", int(packet.AddrType)).
+					Int("addrType", int(packet.AddrType)).
 					Msg("(UDP=>Interface) Cannot unmarshal packet")
 				continue
 			}
@@ -155,13 +168,13 @@ func (client *Client) Listen() {
 						Err(err).
 						Str("state", "U2I").
 						Int("len", n).
-						Int("AddrType", int(packet.AddrType)).
+						Int("addrType", int(packet.AddrType)).
 						Msg("(UDP=>Interface) Cannot send packet")
 				} else {
 					log.Debug().
 						Str("state", "U2I").
 						Int("len", n).
-						Int("AddrType", int(packet.AddrType)).
+						Int("addrType", int(packet.AddrType)).
 						Msg("(UDP=>Interface) Sent a packet")
 				}
 			} else {
@@ -215,7 +228,7 @@ func (client *Client) Listen() {
 							Err(err).
 							Str("state", "I2U").
 							Int("len", n).
-							Int("AddrType", int(packet.AddrType)).
+							Int("addrType", int(packet.AddrType)).
 							Msg("(UDP<=Interface) Failed to marshal packet")
 						continue
 					}
@@ -224,13 +237,13 @@ func (client *Client) Listen() {
 							Err(err).
 							Str("state", "I2U").
 							Int("len", n).
-							Int("AddrType", int(packet.AddrType)).
+							Int("addrType", int(packet.AddrType)).
 							Msg("(UDP<=Interface) Failed to send packet")
 					} else {
 						log.Debug().
 							Str("state", "I2U").
 							Int("len", n).
-							Int("AddrType", int(packet.AddrType)).
+							Int("addrType", int(packet.AddrType)).
 							Msg("(UDP<=Interface) Sent a packet")
 					}
 				}
@@ -241,7 +254,7 @@ func (client *Client) Listen() {
 				//log.Warn().
 				//	Int("len", n).
 				//	Str("state", "I2U").
-				//	Int("AddrType", int(version)).
+				//	Int("addrType", int(version)).
 				//	Msg("(UDP<=Interface) IPv6 not supported")
 				continue
 
@@ -269,7 +282,7 @@ func (client *Client) Stop(msg string) {
 }
 
 func (client *Client) PingLoop(duration time.Duration) {
-	packet, err := MakePingPacket(client.IP, client.ServerAddr.IP)
+	packet, err := MakePingPacket(client.VirtualIP, client.ServerAddr.IP)
 	if err != nil {
 		log.Error().
 			Err(err).

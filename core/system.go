@@ -172,6 +172,23 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			// enable NAT
 			ExecCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
 			ExecCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", tunnel.NetCIDR, "-o", "eth0", "-j", "MASQUERADE")
+			// set mss
+			ExecCmd(
+				"iptables", "-t", "mangle", "-A", "FORWARD",
+				"-i", tunnel.IfaceName,
+				"-p", "tcp",
+				"--tcp-flags", "SYN,RST", "SYN",
+				"-j", "TCPMSS",
+				"--clamp-mss-to-pmtu",
+			)
+			ExecCmd(
+				"iptables", "-t", "mangle", "-A", "FORWARD",
+				"-o", tunnel.IfaceName,
+				"-p", "tcp",
+				"--tcp-flags", "SYN,RST", "SYN",
+				"-j", "TCPMSS",
+				"--clamp-mss-to-pmtu",
+			)
 		}
 
 		ifaceMaskOnes, _ := ipNet.Mask.Size()
@@ -183,11 +200,10 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		ExecCmd("ip", "addr", "add",
 			fmt.Sprintf("%s/%d", tunnel.InterfaceIP, ifaceMaskOnes), "dev", tunnel.IfaceName)
 		// set mtu
-		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "mtu", "1500")
+		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "mtu", strconv.Itoa(MaxPayload))
 		// turn interface on
 		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "up")
 
-		//ExecCmd("ip", "route", "add", "1.1.1.1", "dev", IfaceName) // dns
 	case "darwin":
 		log.Error().
 			Err(err).
@@ -195,6 +211,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			Str("CIDR", tunnel.NetCIDR).
 			Msg("Darwin not yet supported")
 		return errors.New("darwin not yet supported")
+
 	case "windows":
 		ifaceMask := net.IP(ipNet.Mask).String()
 		gatewayIP := ip.String()
@@ -204,8 +221,25 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			tunnel.IfaceName, tunnel.InterfaceIP, ifaceMask))
 		// set metric to interface
 		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
+		// set mtu to interface
+		ExecCmd(
+			"netsh",
+			"interface",
+			"ipv4",
+			"set",
+			"subinterface",
+			fmt.Sprintf(`"%s"`, tunnel.IfaceName),
+			fmt.Sprintf("mtu=%d", MaxPayload),
+			"store=persistent",
+		)
 
 		if tunnel.DestinationIP != "" { // client
+			// add dns route
+			ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+				"static", "8.8.8.8")
+			ExecCmd("netsh", "interface", "ipv4", "add", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+				"addr=1.1.1.1", "index=2")
+
 			if len(tunnel.Whitelist) == 0 {
 				// excluding route to remove connection loop
 				defGatewayIP, err := getDefaultGatewayWindows()
@@ -261,10 +295,6 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			}
 		}
 
-		//// add dns route
-		//ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf("name=%d", IfaceName),
-		//	fmt.Sprintf("static=%d", ip.String()))
-
 	default:
 		return fmt.Errorf("not support os:%v", runtime.GOOS)
 	}
@@ -278,7 +308,6 @@ func (tunnel *Tunnel) Stop() {
 			ExecCmd("route", "delete", tunnel.DestinationIP)
 			for _, addr := range tunnel.Blacklist {
 				ExecCmd("route", "delete", addr)
-				fmt.Println(addr, "deleted")
 			}
 		case "linux":
 			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
@@ -308,7 +337,7 @@ func ExecCmd(c string, args ...string) string {
 		Str("bin", cmd.Path).
 		Strs("cmd", cmd.Args).
 		Str("result", result).
-		Msg("Failed to execute command")
+		Msg("command executed")
 	return result
 }
 
@@ -416,7 +445,7 @@ func (s *SyncWriter) Write(p []byte) (n int, err error) {
 	return s.w.Write(p)
 }
 
-func InitLogger(levelStr string) {
+func InitLogger(levelStr string, filename string) {
 	stdlog.SetOutput(io.Discard)
 	zerolog.TimeFieldFormat = time.RFC3339
 
@@ -424,18 +453,32 @@ func InitLogger(levelStr string) {
 	if err != nil {
 		level = zerolog.InfoLevel
 	}
-
 	zerolog.SetGlobalLevel(level)
+
+	var out io.Writer
+	if filename != "" {
+		file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatal().
+				Err(err).
+				Str("state", "logSetup").
+				Msg("Cannot open log file")
+		}
+
+		out = io.MultiWriter(os.Stdout, file)
+	} else {
+		out = os.Stdout
+	}
 	cw := zerolog.ConsoleWriter{
-		Out:        os.Stdout,
+		Out:        out,
 		TimeFormat: "15:04:05",
 	}
 
 	log.Logger = log.Output(&SyncWriter{w: cw})
 	if err != nil {
 		log.Error().
-			Str("state", "logSetup").
 			Err(err).
+			Str("state", "logSetup").
 			Msg("Failed to parse log level")
 	}
 }

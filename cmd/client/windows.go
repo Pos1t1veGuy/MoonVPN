@@ -25,6 +25,7 @@ func main() {
 	serHost := flag.String("host", "194.41.113.111", "server host")
 	serPort := flag.Int("port", 5555, "server port")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
+	finishPause := flag.Bool("finish_pause", true, "wait for user input before exit")
 	wlPath := flag.String(
 		"whitelist",
 		"whitelist.txt",
@@ -35,13 +36,24 @@ func main() {
 		"blacklist.txt",
 		"path to blacklist file",
 	)
+	logFilePath := flag.String(
+		"logfile",
+		"",
+		"path to logfile file (by default logfile=\"\", so it is disabled)",
+	)
 	flag.Parse()
+	if *finishPause {
+		defer func() {
+			fmt.Println("Press Enter to exit...")
+			_, _ = fmt.Scanln()
+		}()
+	}
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
 		fmt.Fprintf(os.Stderr, "invalid logLevel: %q\n", *logLevel)
 		os.Exit(1)
 	}
-	core.InitLogger(*logLevel)
+	core.InitLogger(*logLevel, *logFilePath)
 
 	whitelist, err := loadListFile(*wlPath, "# Place IPs line by line to exclude them from routing.\n"+
 		"# Don't enter IP addresses if you want to route all system traffic.\n\n")
@@ -75,7 +87,7 @@ func main() {
 }
 
 func loadListFile(path string, defaultContent string) ([]string, error) {
-	if err := ensureListFile(path, defaultContent); err != nil {
+	if err := ensureFile(path, defaultContent); err != nil {
 		return nil, err
 	}
 
@@ -103,7 +115,7 @@ func loadListFile(path string, defaultContent string) ([]string, error) {
 	return whitelist, nil
 }
 
-func ensureListFile(path string, content string) error {
+func ensureFile(path string, content string) error {
 	_, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		err = os.WriteFile(path, []byte(content), 0644)

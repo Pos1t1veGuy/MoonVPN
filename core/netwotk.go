@@ -10,6 +10,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const MaxPayload = 1400
+
 func (client *Client) Handshake() (net.IP, error) {
 	packet, err := MakeDefaultPacket(net.ParseIP("0.0.0.0"), client.ServerAddr.IP, []byte{0x01, 0x01})
 	if err != nil {
@@ -51,7 +53,12 @@ func (client *Client) Handshake() (net.IP, error) {
 			return nil, errors.New("server returned zero IP")
 		}
 
-		return packet.DstIP, nil
+		ip4 := packet.DstIP.To4()
+		if ip4 == nil {
+			return nil, fmt.Errorf("server returned invalid IP")
+		}
+
+		return ip4, nil
 	}
 }
 
@@ -102,13 +109,13 @@ func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet
 					Str("state", "API").
 					Str("peer", strClientAddr).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("Peer disconnected")
+					Msg("(UDP=>Interface) Peer disconnected")
 			} else {
 				log.Info().
 					Str("state", "API").
 					Str("peer", strClientAddr).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("Peer not found")
+					Msg("(UDP=>Interface) Peer not found")
 			}
 			server.mu.Unlock()
 
@@ -120,7 +127,7 @@ func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet
 					Str("state", "API").
 					Str("peer", strClientAddr).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("Failed to make a PING packet")
+					Msg("(UDP=>Interface) Failed to make a PING packet")
 				return true
 			}
 			bytes, err := MarshalPacket(packet)
@@ -129,19 +136,19 @@ func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet
 					Err(err).
 					Str("state", "API").
 					Str("dstAddr", strClientAddr).
-					Msg("Failed to marshal packet")
+					Msg("(UDP=>Interface) Failed to marshal packet")
 			}
 			if _, err := conn.WriteToUDP(bytes, &clientAddr); err != nil {
 				log.Debug().
 					Err(err).
 					Str("state", "API").
 					Str("dstAddr", strClientAddr).
-					Msg("Failed to send packet")
+					Msg("(UDP=>Interface) Failed to send packet")
 			} else {
 				log.Debug().
 					Str("state", "API").
 					Str("dstAddr", strClientAddr).
-					Msg("Sent a packet")
+					Msg("(UDP=>Interface) Sent a packet")
 			}
 		}
 		return true
@@ -153,13 +160,13 @@ func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet
 	if packet.Type == 1 {
 		switch packet.Rsv {
 		case [4]byte{0, 0, 0, 0}: // disconnect
-			client.Stop("Server disconnected you")
+			client.Stop("(UDP=>Interface) Server disconnected you")
 		case [4]byte{0, 0, 0, 1}: // pong
 			client.Ping.Calculate()
 			log.Info().
 				Str("state", "API").
 				Str("ping", client.Ping.Value.Truncate(time.Millisecond).String()).
-				Msg("Pong received")
+				Msg("(UDP=>Interface) Pong received")
 		}
 		return true
 	}

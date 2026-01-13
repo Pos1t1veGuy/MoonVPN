@@ -42,7 +42,7 @@ func NewPeer(virtualIP net.IP, addr *net.UDPAddr, handshaked bool) *Peer {
 	}
 }
 
-func (server *Server) Start() {
+func (server *Server) StartUnsafe() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	log.Info().
@@ -193,7 +193,8 @@ func (server *Server) Start() {
 					Int("len", n).
 					Str("state", "U2I").
 					Int("addrType", version).
-					Str("peerIP", clientAddr.String()).
+					Str("peerRealIP", clientAddr.String()).
+					Str("peerVirtualIP", peer.VirtualIP.String()).
 					Msg("(UDP=>Interface) Handshake success")
 				continue
 			}
@@ -261,6 +262,17 @@ func (server *Server) Start() {
 		Msg("Server closed")
 }
 
+func (server *Server) Start() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Msgf("Server panicked: %v", r)
+			go server.Start()
+		}
+	}()
+
+	server.StartUnsafe()
+}
+
 type Network struct {
 	Used    map[string]struct{}
 	Current net.IP
@@ -310,6 +322,6 @@ func (network *Network) increment() {
 	}
 }
 
-// фрагментация UDP; шифрование; таймауты; старых peer надо чистить по lastseen; черные списки;
-// аргументация в клиенте; сделать интерфейс врапперов; сделать базовый httpws враппер; присобачить нжинкс
-// приделать базу данных; сделать из впна микросервис докер; присобачить бота; дописать страничку;
+// шифрование; старых peer надо чистить по lastseen; возможно поднять днс прокси сервер
+// сделать интерфейс врапперов; сделать базовый httpws враппер; присобачить нжинкс; рассылать клиентам что сервер выключается
+// приделать базу данных; сделать из впна микросервис докер; присобачить бота; дописать страничку

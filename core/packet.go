@@ -9,7 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// [PacketType:1][AddrType:1][SrcIP:4/16][DstIP:4/16][Rst:4][Length:2][Data:N]
+// Packet [PacketType:1][AddrType:1][SrcIP:4/16][DstIP:4/16][Rst:4][Length:2][Data:N]
 type Packet struct {
 	Type     byte   // (0 - default data packet, 1 - api packet, 2 - keepalive)
 	AddrType byte   // (4 - IPv4, 6 - IPv6)

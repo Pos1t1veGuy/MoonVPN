@@ -22,6 +22,11 @@ func main() {
 	host := flag.String("host", "0.0.0.0", "application host")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
 	port := flag.Int("port", 5555, "application port")
+	logFilePath := flag.String(
+		"logfile",
+		"",
+		"path to logfile file (by default logfile=\"\", so it is disabled)",
+	)
 	flag.Parse()
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
@@ -29,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	core.InitLogger(*logLevel)
+	core.InitLogger(*logLevel, *logFilePath)
 	srv := core.NewLinuxServer(*host, *port, *cidr)
 	srv.Start()
 }
