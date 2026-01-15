@@ -69,7 +69,7 @@ func (adapter *WaterAdapter) Close() {
 	adapter.Interface.Close()
 }
 
-func NewLinuxServer(addr string, port int, CIDR string) *Server {
+func NewLinuxServer(addr string, port int, CIDR string, LayerChains []NetLayer) *Server {
 	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
 	network, err := NewNetwork(CIDR)
 
@@ -96,6 +96,7 @@ func NewLinuxServer(addr string, port int, CIDR string) *Server {
 		Cache:         cache.New(30*time.Minute, 10*time.Minute),
 		Network:       network,
 		Interface:     adapter,
-		AnonymousPeer: NewPeer(nil, nil, false),
+		AnonymousPeer: NewPeer(nil, nil, nil, nil, false),
+		LayerChains:   LayerChains,
 	}
 }

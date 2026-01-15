@@ -23,6 +23,7 @@ type Server struct {
 	AnonymousPeer *Peer
 	Interface     InterfaceAdapter
 	Tunnel        *Tunnel
+	LayerChains   []NetLayer
 	Endpoint
 }
 
@@ -30,14 +31,24 @@ type Peer struct {
 	VirtualIP  net.IP
 	Addr       *net.UDPAddr
 	LastSeen   time.Time
+	NLChain    NetLayer
+	Context    *SessionContext
 	Handshaked bool
 }
 
-func NewPeer(virtualIP net.IP, addr *net.UDPAddr, handshaked bool) *Peer {
+type SessionContext struct {
+	ClientRandom [32]byte
+	ServerRandom [32]byte
+	MasterSecret []byte
+}
+
+func NewPeer(virtualIP net.IP, addr *net.UDPAddr, netChain NetLayer, ctx *SessionContext, handshaked bool) *Peer {
 	return &Peer{
 		VirtualIP:  virtualIP,
 		Addr:       addr,
 		LastSeen:   time.Time{},
+		NLChain:    netChain,
+		Context:    ctx,
 		Handshaked: handshaked,
 	}
 }
@@ -125,7 +136,8 @@ func (server *Server) StartUnsafe() {
 				key = fmt.Sprintf("%v=>%v", packet.DstIP, packet.SrcIP)
 				v, ok := server.Cache.Get(key)
 				if ok {
-					server.SendPacket(packet, v.(*net.UDPAddr))
+					peer := v.(*Peer)
+					server.SendPacket(packet, peer.Addr, peer.NLChain)
 				} else {
 					log.Debug().
 						Str("state", "I2U").
@@ -168,8 +180,8 @@ func (server *Server) StartUnsafe() {
 			}
 
 			// auth
-			if _, found := server.Cache.Get(clientAddr.String()); !found {
-
+			v, found := server.Cache.Get(clientAddr.String())
+			if !found {
 				peer, err := server.Handshake(n, buf, clientAddr)
 				if err != nil || !peer.Handshaked {
 					log.Debug().
@@ -184,7 +196,7 @@ func (server *Server) StartUnsafe() {
 
 				server.Cache.Set(
 					clientAddr.String(),
-					clientAddr,
+					peer,
 					cache.DefaultExpiration,
 				)
 
@@ -198,7 +210,18 @@ func (server *Server) StartUnsafe() {
 				continue
 			}
 
-			packet, err := UnmarshalPacket(buf[:n])
+			peer := v.(*Peer)
+
+			unwrapped, err := peer.NLChain.Wrap(buf[:n])
+			if err != nil {
+				log.Debug().
+					Err(err).
+					Int("len", n).
+					Str("state", "U2I").
+					Int("addrType", version).
+					Msg("(UDP=>Interface) Failed to unwrap packet")
+			}
+			packet, err := UnmarshalPacket(unwrapped)
 			if err != nil || packet.AddrType != 4 {
 				log.Debug().
 					Err(err).
@@ -208,7 +231,7 @@ func (server *Server) StartUnsafe() {
 					Msg("(UDP=>Interface) Failed to marshal packet")
 				continue
 			}
-			if !server.PacketAPI(*server.Conn, *clientAddr, packet) {
+			if !server.PacketAPI(*server.Conn, peer, packet) {
 				if _, err := server.Interface.Write(packet.Data); err != nil {
 					log.Debug().
 						Err(err).
@@ -238,7 +261,7 @@ func (server *Server) StartUnsafe() {
 			}
 
 			key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
-			server.Cache.Set(key, clientAddr, cache.DefaultExpiration)
+			server.Cache.Set(key, peer, cache.DefaultExpiration)
 		}
 	}, true)
 
@@ -247,7 +270,7 @@ func (server *Server) StartUnsafe() {
 		if peer != nil && peer.Addr != nil {
 			packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
 			if err != nil {
-				server.SendPacket(packet, peer.Addr)
+				server.SendPacket(packet, peer.Addr, peer.NLChain)
 			}
 
 			log.Info().
@@ -284,7 +307,7 @@ func (server *Server) DisconnectAll() {
 			continue
 		}
 
-		server.SendPacket(packet, peer.Addr)
+		server.SendPacket(packet, peer.Addr, peer.NLChain)
 		log.Info().
 			Str("state", "closing").
 			Str("peer", peer.Addr.String()).
@@ -341,6 +364,6 @@ func (network *Network) increment() {
 	}
 }
 
-// шифрование; старых peer надо чистить по lastseen; возможно поднять днс прокси сервер
-// сделать интерфейс врапперов; сделать базовый httpws враппер; присобачить нжинкс; рассылать клиентам что сервер выключается
+// шифрование; старых peer надо чистить по lastseen
+// сделать интерфейс врапперов; сделать базовый httpws враппер; присобачить нжинкс
 // приделать базу данных; сделать из впна микросервис докер; присобачить бота; дописать страничку

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Pos1t1veGuy/MoonVPN/core"
+	"github.com/Pos1t1veGuy/MoonVPN/layers"
 	"github.com/rs/zerolog/log"
 )
 
@@ -72,9 +73,13 @@ func main() {
 			Str("path", *blPath).
 			Msg("Failed to load whitelist")
 	}
+	lrs := []core.NetLayer{
+		core.NewDebugLayer(false, false),
+		layers.NewXorLayer([]byte("moonVPN")),
+	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist)
-	connected := cl.Connect(*serHost, *serPort)
+	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
+	connected := cl.Connect(*serHost, *serPort, []uint8{1})
 	if connected == true {
 		cl.Listen()
 	} else {

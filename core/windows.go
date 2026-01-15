@@ -72,7 +72,7 @@ func (adapter *WintunAdapter) Close() {
 	adapter.Close()
 }
 
-func NewWindowsClient(addr string, port int, whiteList []string, blackList []string) *Client {
+func NewWindowsClient(addr string, port int, whiteList []string, blackList []string, netLayers []NetLayer) *Client {
 	adapter, err := NewWintunAdapter("gotun0", 8*1024*1024)
 	if err != nil {
 		log.Fatal().
@@ -81,11 +81,12 @@ func NewWindowsClient(addr string, port int, whiteList []string, blackList []str
 			Msg("Failed to create adapter")
 	}
 	return &Client{
-		WhiteList: whiteList,
-		BlackList: blackList,
-		Interface: adapter,
-		Stopping:  make(chan struct{}),
-		Ping:      NewPing(10 * time.Second),
-		Endpoint:  *NewEndpoint(addr, port, "0.0.0.0/0"),
+		WhiteList:   whiteList,
+		BlackList:   blackList,
+		Interface:   adapter,
+		LayerChains: netLayers,
+		Stopping:    make(chan struct{}),
+		Ping:        NewPing(20 * time.Second),
+		Endpoint:    *NewEndpoint(addr, port, "0.0.0.0/0"),
 	}
 }

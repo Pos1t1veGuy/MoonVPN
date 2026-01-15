@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/Pos1t1veGuy/MoonVPN/core"
+	"github.com/Pos1t1veGuy/MoonVPN/layers"
 )
 
 func main() {
@@ -34,7 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	lrs := []core.NetLayer{
+		core.NewDebugLayer(false, false),
+		layers.NewXorLayer([]byte("moonVPN")),
+	}
+
 	core.InitLogger(*logLevel, *logFilePath)
-	srv := core.NewLinuxServer(*host, *port, *cidr)
+	srv := core.NewLinuxServer(*host, *port, *cidr, lrs)
 	srv.Start()
 }
