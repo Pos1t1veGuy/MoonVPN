@@ -37,7 +37,6 @@ func main() {
 	login := flag.String("login", "admin", "user login")
 	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
-	finishPause := flag.Bool("finish_pause", true, "wait for user input before exit")
 	defaultLayer := flag.Int(
 		"defaultLayer",
 		1,
@@ -113,13 +112,6 @@ func main() {
 			Str("state", "whiteListSetup").
 			Str("path", *blPath).
 			Msg("Failed to load whitelist")
-	}
-
-	if *finishPause {
-		defer func() {
-			fmt.Println("Press Enter to exit...")
-			_, _ = fmt.Scanln()
-		}()
 	}
 
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
